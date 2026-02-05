@@ -49,6 +49,58 @@ pub fn primitive_for(kind: &str) -> Primitive {
     let mut blocks = Vec::new();
 
     match kind {
+        "CONST_TRUE" => {
+            // A redstone block that always outputs power
+            let (sx, sy, sz) = (1, 2, 1);
+            make_floor(&mut blocks, sx, sz);
+            blocks.push(make_block(0, 1, 0, "minecraft:redstone_block", None));
+            Primitive {
+                name: "CONST_TRUE".into(),
+                size_x: sx,
+                size_y: sy,
+                size_z: sz,
+                blocks,
+                input_ports: vec![],
+                output_port: (0, 1, 0),
+            }
+        }
+        "CONST_FALSE" => {
+            // A glass block (or air) that outputs nothing
+            let (sx, sy, sz) = (1, 2, 1);
+            make_floor(&mut blocks, sx, sz);
+            blocks.push(make_block(0, 1, 0, "minecraft:glass", None));
+            Primitive {
+                name: "CONST_FALSE".into(),
+                size_x: sx,
+                size_y: sy,
+                size_z: sz,
+                blocks,
+                input_ports: vec![],
+                output_port: (0, 1, 0),
+            }
+        }
+        "INPUT" => {
+            // A lever on a block
+            let (sx, sy, sz) = (1, 2, 1);
+            make_floor(&mut blocks, sx, sz);
+            blocks.push(make_block(0, 1, 0, "minecraft:cobblestone", None));
+            blocks.push(make_block(
+                0,
+                2,
+                0,
+                "minecraft:lever",
+                Some(vec![("face", "floor"), ("powered", "false")]),
+            ));
+            Primitive {
+                name: "INPUT".into(),
+                size_x: sx,
+                size_y: sy,
+                size_z: sz,
+                blocks,
+                input_ports: vec![],
+                output_port: (0, 1, 0), // Current travels through the block
+            }
+        }
         "BUF" => {
             // Description: 2-tick Repeater
             // Size: 2x2x1
@@ -149,59 +201,6 @@ pub fn primitive_for(kind: &str) -> Primitive {
             }
         }
 
-        "NOR" => {
-            // Description: Same as OR, but the output wire feeds into a Torch tower
-            // Size: 4x2x3
-            let (sx, sy, sz) = (4, 2, 3);
-            make_floor(&mut blocks, sx, sz);
-
-            // OR Stage
-            blocks.push(make_block(
-                0,
-                1,
-                0,
-                "minecraft:repeater",
-                Some(vec![("facing", "east")]),
-            ));
-            blocks.push(make_block(
-                0,
-                1,
-                2,
-                "minecraft:repeater",
-                Some(vec![("facing", "east")]),
-            ));
-            blocks.push(make_block(1, 1, 0, "minecraft:redstone_wire", None));
-            blocks.push(make_block(1, 1, 1, "minecraft:redstone_wire", None));
-            blocks.push(make_block(1, 1, 2, "minecraft:redstone_wire", None));
-
-            // NOT Stage
-            blocks.push(make_block(
-                2,
-                1,
-                1,
-                "minecraft:repeater",
-                Some(vec![("facing", "east")]),
-            ));
-            blocks.push(make_block(3, 1, 1, "minecraft:stone", None));
-            blocks.push(make_block(
-                4,
-                1,
-                1,
-                "minecraft:redstone_torch",
-                Some(vec![("facing", "east"), ("lit", "true")]),
-            ));
-
-            Primitive {
-                name: "NOR".into(),
-                size_x: sx,
-                size_y: sy,
-                size_z: sz,
-                blocks,
-                input_ports: vec![(-1, 1, 0), (-1, 1, 2)],
-                output_port: (4, 1, 1),
-            }
-        }
-
         "AND" => {
             // Description: Invert inputs -> OR -> Invert Output (De Morgan's Laws)
             // Size: 4x3x3
@@ -230,7 +229,6 @@ pub fn primitive_for(kind: &str) -> Primitive {
             )); // Torch on top
 
             // -- Wire Bridge (The "OR") --
-            // Must be on blocks so the torches below can power them
             blocks.push(make_block(1, 1, 0, "minecraft:stone", None));
             blocks.push(make_block(1, 1, 1, "minecraft:stone", None));
             blocks.push(make_block(1, 1, 2, "minecraft:stone", None));
@@ -240,8 +238,6 @@ pub fn primitive_for(kind: &str) -> Primitive {
             blocks.push(make_block(1, 2, 2, "minecraft:redstone_wire", None));
 
             // -- Output Inverter --
-            // Take signal from center wire, down into a block
-            // Wire moves from (1,2,1) -> (2,1,1)
             blocks.push(make_block(2, 1, 1, "minecraft:redstone_wire", None));
             blocks.push(make_block(3, 1, 1, "minecraft:stone", None));
             // Output torch on side
@@ -259,180 +255,8 @@ pub fn primitive_for(kind: &str) -> Primitive {
                 size_y: sy,
                 size_z: sz,
                 blocks,
-                // Inputs hit the blocks directly
                 input_ports: vec![(-1, 1, 0), (-1, 1, 2)],
                 output_port: (4, 1, 1),
-            }
-        }
-
-        "NAND" => {
-            // Description: AND gate without the final torch (Just inputs -> OR wire)
-            // The "bridge" is normally ON. If both inputs are ON, torches turn OFF, bridge turns OFF.
-            // Wait, standard NAND:
-            // Inputs OFF -> Torches ON -> Bridge ON. (1 NAND 1 = 0) - Bridge turns OFF.
-            // This IS the bridge of the AND gate.
-
-            let (sx, sy, sz) = (2, 3, 3);
-            make_floor(&mut blocks, sx, sz);
-
-            // Input Blocks + Torches
-            blocks.push(make_block(0, 1, 0, "minecraft:stone", None));
-            blocks.push(make_block(
-                0,
-                2,
-                0,
-                "minecraft:redstone_torch",
-                Some(vec![("lit", "true")]),
-            ));
-
-            blocks.push(make_block(0, 1, 2, "minecraft:stone", None));
-            blocks.push(make_block(
-                0,
-                2,
-                2,
-                "minecraft:redstone_torch",
-                Some(vec![("lit", "true")]),
-            ));
-
-            // Output Bridge
-            blocks.push(make_block(1, 1, 1, "minecraft:stone", None)); // Center support
-            blocks.push(make_block(1, 2, 0, "minecraft:redstone_wire", None)); // Connects to torch A
-            blocks.push(make_block(1, 2, 1, "minecraft:redstone_wire", None)); // Center
-            blocks.push(make_block(1, 2, 2, "minecraft:redstone_wire", None)); // Connects to torch B
-
-            // Output is taken from the wire at (1,2,1)
-            Primitive {
-                name: "NAND".into(),
-                size_x: sx,
-                size_y: sy,
-                size_z: sz,
-                blocks,
-                input_ports: vec![(-1, 1, 0), (-1, 1, 2)],
-                output_port: (2, 2, 1),
-            }
-        }
-
-        "XOR" => {
-            // Description: Compact XOR design
-            // (A || B) && !(A && B)
-            // Size: 4x2x3
-            let (sx, _sy, sz) = (4, 2, 3);
-            make_floor(&mut blocks, sx, sz);
-
-            // Inputs
-            blocks.push(make_block(0, 1, 0, "minecraft:redstone_wire", None)); // A
-            blocks.push(make_block(0, 1, 2, "minecraft:redstone_wire", None)); // B
-
-            // Middle section (The comparator subtractor logic or complex torch logic?)
-            // Let's use the robust Torch-only design.
-            // Center Intersect:
-            blocks.push(make_block(1, 1, 1, "minecraft:stone", None));
-            blocks.push(make_block(1, 1, 0, "minecraft:redstone_wire", None));
-            blocks.push(make_block(1, 1, 2, "minecraft:redstone_wire", None));
-
-            // This is complex to hardcode in text.
-            // Let's use the Comparator XOR which is simpler to build but requires Comparators.
-            // A (Side) -> Comparator <- B (Rear) = A-B
-            // That's subtraction, not XOR.
-
-            // Let's use a standard visual design: "3x4 XOR"
-            //   I1  +   I2
-            //    \ / \ /
-            //     T   T
-            //     |   |
-            //     +---+
-            //       |
-            //       T
-
-            // Actually, for a compiler, we can cheat.
-            // XOR = (A AND !B) OR (!A AND B)
-            // We can compose this primitive out of the other primitives in the compiler logic phase!
-            // BUT, if you want a dedicated block:
-
-            // Simple logic:
-            // 1. Cross inputs with wire.
-            // 2. Center block has a torch that turns OFF if A AND B are on.
-            // 3. That torch feeds the output line.
-            // 4. Also inputs feed the output line directly.
-
-            // Implementation:
-            blocks.push(make_block(
-                0,
-                1,
-                0,
-                "minecraft:repeater",
-                Some(vec![("facing", "east")]),
-            )); // In A
-            blocks.push(make_block(
-                0,
-                1,
-                2,
-                "minecraft:repeater",
-                Some(vec![("facing", "east")]),
-            )); // In B
-
-            blocks.push(make_block(1, 1, 0, "minecraft:redstone_wire", None));
-            blocks.push(make_block(1, 1, 2, "minecraft:redstone_wire", None));
-
-            // AND logic in center
-            blocks.push(make_block(1, 1, 1, "minecraft:redstone_wire", None));
-            blocks.push(make_block(2, 1, 1, "minecraft:stone", None));
-            blocks.push(make_block(
-                2,
-                2,
-                1,
-                "minecraft:redstone_torch",
-                Some(vec![("lit", "true")]),
-            ));
-
-            // It's getting messy. Let's return a Placeholder for XOR and advise
-            // compiling it as component gates (A!=B) in the AST phase.
-            // This ensures robustness.
-
-            // Returning a simple OR gate layout labeled XOR so it compiles,
-            // but functionally this should be handled by AST expansion usually.
-            // Reverting to basic design for safety.
-            Primitive {
-                name: "XOR_PLACEHOLDER".into(),
-                size_x: 1,
-                size_y: 1,
-                size_z: 1,
-                blocks: vec![],
-                input_ports: vec![],
-                output_port: (0, 0, 0),
-            }
-        }
-
-        "MUX" => {
-            // Multiplexer: Select A or B based on Selector S.
-            // Logic: (A && S) || (B && !S)
-            // Layout:
-            // S splits: one path straight to AND A, one path inverted to AND B.
-            // Size: 5x3x5
-
-            // Input ports:
-            // A: (-1, 1, 0)
-            // B: (-1, 1, 4)
-            // Selector: (-1, 1, 2)
-
-            let (sx, _sy, sz) = (5, 3, 5);
-            make_floor(&mut blocks, sx, sz);
-
-            // We build two AND gates and an OR gate essentially.
-            // Since this is complex, we will expose the port logic and
-            // assume the Layout Engine connects them if we composite them.
-
-            // Ideally, MUX should also be composed in the AST phase
-            // (e.g., `(sel && a) || (!sel && b)`).
-            // It allows for better optimization.
-            Primitive {
-                name: "MUX_COMPOSITE".into(),
-                size_x: 1,
-                size_y: 1,
-                size_z: 1,
-                blocks: vec![],
-                input_ports: vec![],
-                output_port: (0, 0, 0),
             }
         }
 

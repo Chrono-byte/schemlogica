@@ -1,83 +1,61 @@
 use anyhow::Result;
-use serde_json::{json, Value};
-
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator};
-
-fn id_name_from_binding(ident: &BindingIdentifier) -> String {
-    ident.name.as_str().to_string()
-}
-
-fn id_name_from_identref(ident: &IdentifierReference) -> String {
-    ident.name.as_str().to_string()
-}
+use serde_json::{json, Value};
 
 fn expr_to_json<'a>(expr: &Expression<'a>) -> anyhow::Result<Value> {
     match expr {
-        Expression::BooleanLiteral(boxed) => {
-            let lit = &**boxed;
-            Ok(json!({"type":"Literal","value": lit.value }))
-        }
+        Expression::BooleanLiteral(boxed) => Ok(json!({"type":"Literal","value": boxed.value })),
         Expression::Identifier(boxed) => {
-            let id = &**boxed;
-            Ok(json!({"type":"Identifier","name": id.name.as_str()}))
+            Ok(json!({"type":"Identifier","name": boxed.name.as_str()}))
         }
         Expression::UnaryExpression(boxed) => {
-            let u = &**boxed;
-            if u.operator != UnaryOperator::LogicalNot {
+            if boxed.operator != UnaryOperator::LogicalNot {
                 anyhow::bail!("Only ! unary operator supported");
             }
-            let arg = expr_to_json(&u.argument)?;
+            let arg = expr_to_json(&boxed.argument)?;
             Ok(json!({"type":"UnaryExpression","operator":"!","argument": arg}))
         }
         Expression::LogicalExpression(boxed) => {
-            let le = &**boxed;
-            let op = match le.operator {
+            let op = match boxed.operator {
                 LogicalOperator::And => "&&",
                 LogicalOperator::Or => "||",
                 _ => anyhow::bail!("Unsupported logical operator"),
             };
-            let left = expr_to_json(&le.left)?;
-            let right = expr_to_json(&le.right)?;
+            let left = expr_to_json(&boxed.left)?;
+            let right = expr_to_json(&boxed.right)?;
             Ok(json!({"type":"LogicalExpression","operator": op, "left": left, "right": right}))
         }
         Expression::BinaryExpression(boxed) => {
-            let be = &**boxed;
-            let op = match be.operator {
+            let op = match boxed.operator {
                 BinaryOperator::Equality => "==",
                 BinaryOperator::Inequality => "!=",
                 _ => anyhow::bail!("Only == and != supported in binary expressions"),
             };
-            let left = expr_to_json(&be.left)?;
-            let right = expr_to_json(&be.right)?;
+            let left = expr_to_json(&boxed.left)?;
+            let right = expr_to_json(&boxed.right)?;
             Ok(json!({"type":"BinaryExpression","operator": op, "left": left, "right": right}))
         }
         Expression::ConditionalExpression(boxed) => {
-            let ce = &**boxed;
-            let test = expr_to_json(&ce.test)?;
-            let cons = expr_to_json(&ce.consequent)?;
-            let alt = expr_to_json(&ce.alternate)?;
+            let test = expr_to_json(&boxed.test)?;
+            let cons = expr_to_json(&boxed.consequent)?;
+            let alt = expr_to_json(&boxed.alternate)?;
             Ok(
                 json!({"type":"ConditionalExpression","test": test, "consequent": cons, "alternate": alt}),
             )
         }
-        Expression::ParenthesizedExpression(boxed) => {
-            let pe = &**boxed;
-            expr_to_json(&pe.expression)
-        }
+        Expression::ParenthesizedExpression(boxed) => expr_to_json(&boxed.expression),
         Expression::AssignmentExpression(boxed) => {
-            let ae = &**boxed;
-            if ae.operator != AssignmentOperator::Assign {
+            if boxed.operator != AssignmentOperator::Assign {
                 anyhow::bail!("Only = assignment supported");
             }
-            match &ae.left {
+            match &boxed.left {
                 AssignmentTarget::AssignmentTargetIdentifier(id_box) => {
-                    let id = &**id_box;
-                    let name = id.name.as_str().to_string();
-                    let right = expr_to_json(&ae.right)?;
+                    let name = id_box.name.as_str().to_string();
+                    let right = expr_to_json(&boxed.right)?;
                     Ok(
                         json!({"type":"AssignmentExpression","operator":"=","left": {"type":"Identifier","name": name}, "right": right}),
                     )
@@ -90,35 +68,32 @@ fn expr_to_json<'a>(expr: &Expression<'a>) -> anyhow::Result<Value> {
 }
 
 fn stmt_to_json<'a>(stmt: &Statement<'a>) -> anyhow::Result<Value> {
-    use Statement::*;
     match stmt {
-        VariableDeclaration(vd) => {
+        Statement::VariableDeclaration(vd) => {
             if vd.kind != VariableDeclarationKind::Let {
                 anyhow::bail!("Only `let` declarations are allowed");
             }
             let mut decls = Vec::new();
             for d in &vd.declarations {
-                match &d.id {
-                    BindingPattern::BindingIdentifier(bi) => {
-                        let name = bi.name.as_str().to_string();
-                        if let Some(init_expr) = &d.init {
-                            let init = expr_to_json(init_expr)?;
-                            decls.push(json!({"type":"VariableDeclarator","id": {"type":"Identifier","name": name}, "init": init}));
-                        } else {
-                            // Allow uninitialized variables: treat them as inputs/levers later in the pipeline.
-                            decls.push(json!({"type":"VariableDeclarator","id": {"type":"Identifier","name": name}}));
-                        }
+                if let BindingPattern::BindingIdentifier(bi) = &d.id {
+                    let name = bi.name.as_str().to_string();
+                    if let Some(init_expr) = &d.init {
+                        let init = expr_to_json(init_expr)?;
+                        decls.push(json!({"type":"VariableDeclarator","id": {"type":"Identifier","name": name}, "init": init}));
+                    } else {
+                        decls.push(json!({"type":"VariableDeclarator","id": {"type":"Identifier","name": name}}));
                     }
-                    _ => anyhow::bail!("Destructuring not supported"),
+                } else {
+                    anyhow::bail!("Destructuring not supported");
                 }
             }
             Ok(json!({"type":"VariableDeclaration","kind":"let","declarations": decls}))
         }
-        ExpressionStatement(es) => {
+        Statement::ExpressionStatement(es) => {
             let expr = expr_to_json(&es.expression)?;
             Ok(json!({"type":"ExpressionStatement","expression": expr}))
         }
-        _ => anyhow::bail!("Unsupported top-level statement: {:?}", stmt),
+        _ => anyhow::bail!("Unsupported top-level statement"),
     }
 }
 
@@ -129,12 +104,9 @@ pub fn parse_and_validate(code: &str) -> Result<Value> {
     if ret.panicked || !ret.errors.is_empty() {
         anyhow::bail!("Parse errors: {:?}", ret.errors);
     }
-
     let mut body = Vec::new();
     for stmt in &ret.program.body {
-        let s = stmt_to_json(stmt)?;
-        body.push(s);
+        body.push(stmt_to_json(stmt)?);
     }
-
     Ok(json!({"type":"Program","body": body}))
 }
