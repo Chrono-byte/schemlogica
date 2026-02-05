@@ -8,6 +8,12 @@ use std::fs::File;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// Routing constants
+const REDSTONE_SIGNAL_LIMIT: i32 = 15;
+const REPEATER_THRESHOLD: i32 = 14;
+const WIRE_LANE_START_Y: i32 = 4;
+const WIRE_Y_SPACING: i32 = 2; // Vertical spacing between wire lanes
+
 pub fn write_schem(_circuit: &Circuit, _layout: &Layout, path: &Path) -> Result<()> {
     let mut root_map = Map::new();
     root_map.insert("SubVersion".to_string(), Value::Int(1));
@@ -48,7 +54,7 @@ pub fn write_schem(_circuit: &Circuit, _layout: &Layout, path: &Path) -> Result<
     ) {
         placed.push((x, y - 1, z, "minecraft:glass".to_string(), None)); // Support
         *dist += 1;
-        if *dist >= 15 {
+        if *dist >= REPEATER_THRESHOLD {
             *dist = 0;
             placed.push((
                 x,
@@ -103,18 +109,147 @@ pub fn write_schem(_circuit: &Circuit, _layout: &Layout, path: &Path) -> Result<
 
     // Routing
     let mut signal_output_pos: HashMap<String, (i32, i32, i32)> = HashMap::new();
+    let mut signal_source_gate: HashMap<String, String> = HashMap::new();
     for g in &_circuit.gates {
         if let Some(&(gx, gy, gz)) = pos_map.get(&g.id) {
             let prim = primitive_for(&g.kind);
             let (ox, oy, oz) = prim.output_port;
             signal_output_pos.insert(g.output.clone(), (gx + ox, gy + oy, gz + oz));
+            signal_source_gate.insert(g.output.clone(), g.id.clone());
         }
     }
 
-    // Wiring Plan:
-    // To avoid collisions, we assign each wire a unique "lane" (Y level).
-    // Start wires high up (Y=5) to avoid hitting gates (Y=0..3).
-    let mut next_wire_y = 5;
+    // --- Flat Routing Strategy ---
+    // Use A* pathfinding to route wires on the ground (Y=1) around obstacles.
+    // 1. Mark all gate blocks as obstacles.
+    // 2. Route wires sequentially using A*.
+    // 3. Mark placed wires as new obstacles.
+
+    // Grid management
+    let mut grid_obstacles: std::collections::HashSet<(i32, i32)> =
+        std::collections::HashSet::new();
+
+    // Mark gates as obstacles
+    for g in &_circuit.gates {
+        if let Some(&(gx, gy, gz)) = pos_map.get(&g.id) {
+            let prim = primitive_for(&g.kind);
+            // Mark the footprint. previously we added a 1-block negative padding
+            // around primitives which caused ports to be embedded inside obstacles.
+            // Reduce padding to 0 to give ports more room (helps routing).
+            let pad_x_before = 0; // was -1
+            let pad_z_before = 0; // was -1
+            for x in pad_x_before..=prim.size_x {
+                for z in pad_z_before..=prim.size_z {
+                    grid_obstacles.insert((gx + x, gz + z));
+                }
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+    struct Point {
+        x: i32,
+        z: i32,
+    }
+
+    impl Point {
+        fn dist(&self, other: &Point) -> i32 {
+            (self.x - other.x).abs() + (self.z - other.z).abs()
+        }
+    }
+
+    // A* Pathfinding
+    fn find_path(
+        start: Point,
+        end: Point,
+        obstacles: &std::collections::HashSet<(i32, i32)>,
+    ) -> Option<Vec<Point>> {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+
+        // Priority queue holds (cost+heuristic, cost, point)
+        let mut open_set = BinaryHeap::new();
+        open_set.push(Reverse((0, 0, start)));
+
+        let mut came_from: HashMap<Point, Point> = HashMap::new();
+        let mut g_score: HashMap<Point, i32> = HashMap::new();
+        g_score.insert(start, 0);
+
+        let mut close_set = std::collections::HashSet::new();
+
+        // Safety Break (don't search forever)
+        let max_steps = 10000;
+        let mut steps = 0;
+
+        while let Some(Reverse((_, current_g, current))) = open_set.pop() {
+            steps += 1;
+            // if steps > max_steps { return None; } // remove limit for reliable outputs
+
+            if current == end {
+                // Reconstruct path
+                let mut path = vec![current];
+                let mut curr = current;
+                while let Some(&prev) = came_from.get(&curr) {
+                    path.push(prev);
+                    curr = prev;
+                }
+                path.reverse();
+                return Some(path);
+            }
+
+            close_set.insert(current);
+
+            // Neighbors (4 directions)
+            let neighbors = [
+                Point {
+                    x: current.x + 1,
+                    z: current.z,
+                },
+                Point {
+                    x: current.x - 1,
+                    z: current.z,
+                },
+                Point {
+                    x: current.x,
+                    z: current.z + 1,
+                },
+                Point {
+                    x: current.x,
+                    z: current.z - 1,
+                },
+            ];
+
+            for &next in &neighbors {
+                if close_set.contains(&next) {
+                    continue;
+                }
+
+                // Check obstacles (except for end point, which might be "in" a gate port)
+                if next != end && obstacles.contains(&(next.x, next.z)) {
+                    continue;
+                }
+
+                let tentative_g = current_g + 1;
+
+                if tentative_g < *g_score.get(&next).unwrap_or(&i32::MAX) {
+                    came_from.insert(next, current);
+                    g_score.insert(next, tentative_g);
+                    let f_score = tentative_g + next.dist(&end);
+                    open_set.push(Reverse((f_score, tentative_g, next)));
+                }
+            }
+        }
+        None
+    }
+
+    // Collect signals
+    struct Connection {
+        src: Point,
+        dst: Point,
+        src_y: i32,
+        dst_y: i32,
+    }
+    let mut connections = Vec::new();
 
     for g in &_circuit.gates {
         if let Some(&(gx, gy, gz)) = pos_map.get(&g.id) {
@@ -123,80 +258,351 @@ pub fn write_schem(_circuit: &Circuit, _layout: &Layout, path: &Path) -> Result<
                 if let Some(src_sig) = g.inputs.get(i_idx) {
                     if let Some(&(sx, sy, sz)) = signal_output_pos.get(src_sig) {
                         let (ix, iy, iz) = (gx + in_port.0, gy + in_port.1, gz + in_port.2);
+                        connections.push(Connection {
+                            src: Point { x: sx, z: sz },
+                            dst: Point { x: ix, z: iz },
+                            src_y: sy,
+                            dst_y: iy,
+                        });
 
-                        let lane_y = next_wire_y;
-                        next_wire_y += 1;
-
-                        // (helpers are above as functions to avoid borrowing placed twice)
-
-                        // --- Execution ---
-                        let mut signal_dist = 0;
-
-                        // 1. Riser: Output (sy) -> Lane (lane_y)
-                        // We staircase "out" in Z to avoid hitting the gate itself.
-                        let z_lane_start = build_stairs_fn(&mut placed, sx, sy, lane_y, sz);
-
-                        // 2. Horizontal: Move X (sx -> ix) at lane_y
-                        let mut cx = sx;
-                        let dx = if ix >= sx { 1 } else { -1 };
-                        let facing = if dx > 0 { "east" } else { "west" };
-
-                        // First match X
-                        while cx != ix {
-                            cx += dx;
-                            place_wire_fn(
-                                &mut placed,
-                                cx,
-                                lane_y,
-                                z_lane_start,
-                                &mut signal_dist,
-                                facing,
-                            );
-                        }
-
-                        // 3. Horizontal: Move Z (z_lane_start -> iz) at lane_y?
-                        // Wait, we need to arrive at `iz` eventually.
-                        // But we also need to staircase down from `lane_y` to `iy`.
-                        // Let's travel Z until we are close enough?
-                        // Actually, just travel to `iz` (adjusted for the staircase length needed).
-                        // Staircase length = abs(lane_y - iy).
-                        let stairs_len = (lane_y - iy).abs();
-                        // Target Z for the top of the down-stairs
-                        let z_pre_drop = iz - stairs_len;
-
-                        // Move Z from current (z_lane_start) to z_pre_drop
-                        let mut cz = z_lane_start;
-                        let dz = if z_pre_drop >= z_lane_start { 1 } else { -1 };
-                        let z_face = if dz > 0 { "south" } else { "north" };
-
-                        while cz != z_pre_drop {
-                            cz += dz;
-                            place_wire_fn(&mut placed, cx, lane_y, cz, &mut signal_dist, z_face);
-                        }
-
-                        // 4. Drop: Lane (lane_y) -> Input (iy)
-                        // Using staircase logic, which naturally moves Z+ as it goes down.
-                        // We aimed for `iz - stairs_len`, so adding `stairs_len` (from Z moves) lands us at `iz`.
-                        let final_z = build_stairs_fn(&mut placed, cx, lane_y, iy, cz);
-
-                        // Connect final tip to input port?
-                        // The staircase places wire at (cx, iy, final_z).
-                        // The input port is at (ix, iy, iz).
-                        // Due to our calc, final_z should approx equals iz.
-                        // Just run a tiny wire to connect if off by 1.
-                        if final_z != iz {
-                            let dz2 = if iz >= final_z { 1 } else { -1 };
-                            let mut cz2 = final_z;
-                            while cz2 != iz {
-                                cz2 += dz2;
-                                place_wire_fn(&mut placed, cx, iy, cz2, &mut signal_dist, "south");
-                            }
+                        // Diagnostic: if the Manhattan distance is large, print details
+                        let manhattan = (sx - ix).abs() + (sz - iz).abs();
+                        if manhattan > 20 {
+                            let src_gate = signal_source_gate
+                                .get(src_sig)
+                                .cloned()
+                                .unwrap_or("<unknown>".to_string());
+                            eprintln!("Long connection (distance {}) for signal '{}' from gate '{}' @ ({},{}) to gate '{}' @ ({},{})",
+                                manhattan, src_sig, src_gate, sx, sz, g.id, ix, iz);
                         }
                     }
                 }
             }
         }
     }
+
+    // Sort connections by length (heuristic) to route short ones first?
+    // Or maybe route long ones first?
+    // Let's just route in order.
+
+    for conn in connections {
+        // Clear obstacles at start/end to ensure connectivity
+        // (Sometimes ports are inside the "block footprint" padding)
+        // Actually, find_path already allows end point.
+
+        // Allow start/end positions to be considered free even if they lie inside
+        // the padded gate footprints. Clone the obstacle set and clear the endpoints
+        // so A* can start or finish inside what was marked as an obstacle.
+        let mut local_obs = grid_obstacles.clone();
+        local_obs.remove(&(conn.src.x, conn.src.z));
+        local_obs.remove(&(conn.dst.x, conn.dst.z));
+
+        if let Some(path) = find_path(conn.src, conn.dst, &local_obs) {
+            // Place path
+            let mut signal_dist = 0;
+
+            for (idx, p) in path.iter().enumerate() {
+                // Determine direction for repeaters
+                let facing = if idx + 1 < path.len() {
+                    let next = path[idx + 1];
+                    if next.x > p.x {
+                        "east"
+                    } else if next.x < p.x {
+                        "west"
+                    } else if next.z > p.z {
+                        "south"
+                    } else {
+                        "north"
+                    }
+                } else {
+                    "north" // default
+                };
+
+                // Add to obstacles for future wires
+                grid_obstacles.insert((p.x, p.z));
+
+                // Place wire or repeater
+                // Don't place on top of start/end if they are higher up?
+                // Logic:
+                // If this is the START point:
+                //   If src_y > 1, we need to bridge down.
+                //   The path[0] is at (src_x, src_z) at Y=1.
+                //   We need to ensure connection from (src_x, src_y, src_z) to (src_x, 1, src_z).
+
+                let is_start = idx == 0;
+                let is_end = idx == path.len() - 1;
+
+                place_wire_fn(&mut placed, p.x, 1, p.z, &mut signal_dist, facing);
+
+                // Handle vertical transitions at endpoints
+                if is_start && conn.src_y > 1 {
+                    // Vertical drop from src_y to 1
+                    let mut cy = conn.src_y;
+                    while cy > 1 {
+                        placed.push((p.x, cy - 1, p.z, "minecraft:glass".to_string(), None));
+                        placed.push((p.x, cy, p.z, "minecraft:redstone_wire".to_string(), None));
+                        cy -= 1;
+                    }
+                }
+
+                if is_end && conn.dst_y > 1 {
+                    // Vertical rise from 1 to dst_y
+                    let mut cy = 1;
+                    while cy < conn.dst_y {
+                        placed.push((p.x, cy, p.z, "minecraft:glass".to_string(), None)); // Step support
+                        placed.push((
+                            p.x,
+                            cy + 1,
+                            p.z,
+                            "minecraft:redstone_wire".to_string(),
+                            None,
+                        ));
+                        cy += 1;
+                    }
+                }
+            }
+        } else {
+            // Retry with a relaxed obstacle set: clear a 1-block neighborhood around
+            // start and end. This lets the router carve a short tunnel through padding
+            // when ports are only slightly embedded in obstacles.
+            let mut relaxed = grid_obstacles.clone();
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    relaxed.remove(&(conn.src.x + dx, conn.src.z + dz));
+                    relaxed.remove(&(conn.dst.x + dx, conn.dst.z + dz));
+                }
+            }
+
+            if let Some(path) = find_path(conn.src, conn.dst, &relaxed) {
+                let mut signal_dist = 0;
+                for (idx, p) in path.iter().enumerate() {
+                    let facing = if idx + 1 < path.len() {
+                        let next = path[idx + 1];
+                        if next.x > p.x {
+                            "east"
+                        } else if next.x < p.x {
+                            "west"
+                        } else if next.z > p.z {
+                            "south"
+                        } else {
+                            "north"
+                        }
+                    } else {
+                        "north"
+                    };
+
+                    // Mark and place
+                    grid_obstacles.insert((p.x, p.z));
+                    place_wire_fn(&mut placed, p.x, 1, p.z, &mut signal_dist, facing);
+                }
+            } else {
+                // Final fallback: emit debug info and try a straight Manhattan carve
+                eprintln!(
+                    "Warning: No path found for connection {:?} -> {:?}",
+                    conn.src, conn.dst
+                );
+
+                // Debug: print nearby obstacles
+                let r = 3;
+                eprintln!("Nearby obstacles around src:");
+                for dz in -r..=r {
+                    let mut line = String::new();
+                    for dx in -r..=r {
+                        let x = conn.src.x + dx;
+                        let z = conn.src.z + dz;
+                        line.push(if grid_obstacles.contains(&(x, z)) {
+                            '#'
+                        } else {
+                            '.'
+                        });
+                    }
+                    eprintln!("{}", line);
+                }
+
+                eprintln!("Nearby obstacles around dst:");
+                for dz in -r..=r {
+                    let mut line = String::new();
+                    for dx in -r..=r {
+                        let x = conn.dst.x + dx;
+                        let z = conn.dst.z + dz;
+                        line.push(if grid_obstacles.contains(&(x, z)) {
+                            '#'
+                        } else {
+                            '.'
+                        });
+                    }
+                    eprintln!("{}", line);
+                }
+
+                // Try straight Manhattan carve: go along X then Z
+                let mut carve = Vec::new();
+                let mut cx = conn.src.x;
+                let mut cz = conn.src.z;
+                while cx != conn.dst.x {
+                    if conn.dst.x > cx {
+                        cx += 1
+                    } else {
+                        cx -= 1
+                    }
+                    carve.push(Point { x: cx, z: cz });
+                }
+                while cz != conn.dst.z {
+                    if conn.dst.z > cz {
+                        cz += 1
+                    } else {
+                        cz -= 1
+                    }
+                    carve.push(Point { x: cx, z: cz });
+                }
+
+                if !carve.is_empty() {
+                    let mut signal_dist = 0;
+                    for (idx, p) in carve.iter().enumerate() {
+                        let facing = if idx + 1 < carve.len() {
+                            let next = carve[idx + 1];
+                            if next.x > p.x {
+                                "east"
+                            } else if next.x < p.x {
+                                "west"
+                            } else if next.z > p.z {
+                                "south"
+                            } else {
+                                "north"
+                            }
+                        } else {
+                            "north"
+                        };
+
+                        // Remove obstacle and place
+                        grid_obstacles.remove(&(p.x, p.z));
+                        grid_obstacles.insert((p.x, p.z));
+                        place_wire_fn(&mut placed, p.x, 1, p.z, &mut signal_dist, facing);
+                    }
+                }
+            }
+        }
+    }
+
+    // POST-PROCESSING: Calculate redstone wire connections
+    // Redstone wire needs north/south/east/west properties to connect properly
+    fn calculate_redstone_connections(
+        placed: &mut Vec<(i32, i32, i32, String, Option<Vec<(String, String)>>)>,
+    ) {
+        // Build a map of block positions for quick lookup
+        let mut block_map: HashMap<(i32, i32, i32), usize> = HashMap::new();
+        for (idx, (x, y, z, _, _)) in placed.iter().enumerate() {
+            block_map.insert((*x, *y, *z), idx);
+        }
+
+        // Check if a block can connect to redstone wire
+        fn can_connect(name: &str) -> bool {
+            name.contains("redstone")
+                || name.contains("repeater")
+                || name.contains("comparator")
+                || name.contains("torch")
+                || name == "minecraft:cobblestone"
+                || name == "minecraft:sandstone"
+        }
+
+        // Update each redstone wire block
+        for idx in 0..placed.len() {
+            if placed[idx].3 == "minecraft:redstone_wire" {
+                let (x, y, z, _, _) = placed[idx];
+                let mut connections = Vec::new();
+
+                // Check all four horizontal directions
+                // North (-Z)
+                let north_pos = (x, y, z - 1);
+                let north_up = (x, y + 1, z - 1);
+                let north_down = (x, y - 1, z - 1);
+
+                if let Some(&north_idx) = block_map.get(&north_pos) {
+                    if can_connect(&placed[north_idx].3) {
+                        connections.push(("north".to_string(), "side".to_string()));
+                    }
+                } else if let Some(&north_up_idx) = block_map.get(&north_up) {
+                    if can_connect(&placed[north_up_idx].3) {
+                        connections.push(("north".to_string(), "up".to_string()));
+                    }
+                } else if let Some(&north_down_idx) = block_map.get(&north_down) {
+                    if can_connect(&placed[north_down_idx].3) {
+                        connections.push(("north".to_string(), "side".to_string()));
+                    }
+                } else {
+                    connections.push(("north".to_string(), "none".to_string()));
+                }
+
+                // South (+Z)
+                let south_pos = (x, y, z + 1);
+                let south_up = (x, y + 1, z + 1);
+                let south_down = (x, y - 1, z + 1);
+
+                if let Some(&south_idx) = block_map.get(&south_pos) {
+                    if can_connect(&placed[south_idx].3) {
+                        connections.push(("south".to_string(), "side".to_string()));
+                    }
+                } else if let Some(&south_up_idx) = block_map.get(&south_up) {
+                    if can_connect(&placed[south_up_idx].3) {
+                        connections.push(("south".to_string(), "up".to_string()));
+                    }
+                } else if let Some(&south_down_idx) = block_map.get(&south_down) {
+                    if can_connect(&placed[south_down_idx].3) {
+                        connections.push(("south".to_string(), "side".to_string()));
+                    }
+                } else {
+                    connections.push(("south".to_string(), "none".to_string()));
+                }
+
+                // East (+X)
+                let east_pos = (x + 1, y, z);
+                let east_up = (x + 1, y + 1, z);
+                let east_down = (x + 1, y - 1, z);
+
+                if let Some(&east_idx) = block_map.get(&east_pos) {
+                    if can_connect(&placed[east_idx].3) {
+                        connections.push(("east".to_string(), "side".to_string()));
+                    }
+                } else if let Some(&east_up_idx) = block_map.get(&east_up) {
+                    if can_connect(&placed[east_up_idx].3) {
+                        connections.push(("east".to_string(), "up".to_string()));
+                    }
+                } else if let Some(&east_down_idx) = block_map.get(&east_down) {
+                    if can_connect(&placed[east_down_idx].3) {
+                        connections.push(("east".to_string(), "side".to_string()));
+                    }
+                } else {
+                    connections.push(("east".to_string(), "none".to_string()));
+                }
+
+                // West (-X)
+                let west_pos = (x - 1, y, z);
+                let west_up = (x - 1, y + 1, z);
+                let west_down = (x - 1, y - 1, z);
+
+                if let Some(&west_idx) = block_map.get(&west_pos) {
+                    if can_connect(&placed[west_idx].3) {
+                        connections.push(("west".to_string(), "side".to_string()));
+                    }
+                } else if let Some(&west_up_idx) = block_map.get(&west_up) {
+                    if can_connect(&placed[west_up_idx].3) {
+                        connections.push(("west".to_string(), "up".to_string()));
+                    }
+                } else if let Some(&west_down_idx) = block_map.get(&west_down) {
+                    if can_connect(&placed[west_down_idx].3) {
+                        connections.push(("west".to_string(), "side".to_string()));
+                    }
+                } else {
+                    connections.push(("west".to_string(), "none".to_string()));
+                }
+
+                // Update the block with connection properties
+                placed[idx].4 = Some(connections);
+            }
+        }
+    }
+
+    // Apply redstone wire connections
+    calculate_redstone_connections(&mut placed);
 
     // Bounds calculation
     let (min_x, min_y, min_z, max_x, max_y, max_z) = if placed.is_empty() {
