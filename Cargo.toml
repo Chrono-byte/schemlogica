@@ -1,0 +1,20 @@
+[package]
+name = "schemlogica"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+flate2 = "1.0"
+hematite-nbt = { version = "0.5", features = ["serde"] }
+serde_json = "1.0"
+oxc_parser = "0.112"
+oxc_ast = "0.112"
+oxc_allocator = "0.112"
+oxc_span = "0.112"
+oxc_syntax = "0.112"
+serde = { version = "1.0", features = ["derive"] }
+
+[[bin]]
+name = "read_litematic"
+path = "scripts/read_litematic.rs"
