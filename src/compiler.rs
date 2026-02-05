@@ -29,7 +29,6 @@ pub fn compile(program: &Value, _sem: &Semantics) -> Result<Circuit> {
     let mut gates = Vec::new();
     let mut var_signal = std::collections::HashMap::new();
 
-    // Inject Constant Gates
     gates.push(Gate {
         id: "g_const_true".into(),
         kind: "CONST_TRUE".into(),
@@ -97,11 +96,81 @@ pub fn compile(program: &Value, _sem: &Semantics) -> Result<Circuit> {
                 });
                 Ok(out)
             }
+            Some("BinaryExpression") => {
+                let l = compile_expr(expr.get("left").unwrap(), var_signal, gates)?;
+                let r = compile_expr(expr.get("right").unwrap(), var_signal, gates)?;
+                let op = expr.get("operator").and_then(|s| s.as_str()).unwrap();
+
+                // Decomposed XOR: (A || B) && NAND(A, B)
+                if op == "!=" {
+                    let or_out = next_id();
+                    gates.push(Gate {
+                        id: next_id(),
+                        kind: "OR".into(),
+                        inputs: vec![l.clone(), r.clone()],
+                        output: or_out.clone(),
+                    });
+
+                    let nand_out = next_id();
+                    gates.push(Gate {
+                        id: next_id(),
+                        kind: "NAND".into(),
+                        inputs: vec![l, r],
+                        output: nand_out.clone(),
+                    });
+
+                    let xor_out = next_id();
+                    gates.push(Gate {
+                        id: next_id(),
+                        kind: "AND".into(),
+                        inputs: vec![or_out, nand_out],
+                        output: xor_out.clone(),
+                    });
+                    Ok(xor_out)
+                }
+                // Decomposed XNOR: XOR -> NOT
+                else if op == "==" {
+                    let or_out = next_id();
+                    gates.push(Gate {
+                        id: next_id(),
+                        kind: "OR".into(),
+                        inputs: vec![l.clone(), r.clone()],
+                        output: or_out.clone(),
+                    });
+                    let nand_out = next_id();
+                    gates.push(Gate {
+                        id: next_id(),
+                        kind: "NAND".into(),
+                        inputs: vec![l, r],
+                        output: nand_out.clone(),
+                    });
+                    let xor_out = next_id();
+                    gates.push(Gate {
+                        id: next_id(),
+                        kind: "AND".into(),
+                        inputs: vec![or_out, nand_out],
+                        output: xor_out.clone(),
+                    });
+
+                    let xnor_out = next_id();
+                    gates.push(Gate {
+                        id: next_id(),
+                        kind: "NOT".into(),
+                        inputs: vec![xor_out],
+                        output: xnor_out.clone(),
+                    });
+                    Ok(xnor_out)
+                } else {
+                    anyhow::bail!("Unsupported binary op")
+                }
+            }
+            // ... (ConditionalExpression omitted for brevity, handled similarly)
             Some("ConditionalExpression") => {
                 let t = compile_expr(expr.get("test").unwrap(), var_signal, gates)?;
                 let c = compile_expr(expr.get("consequent").unwrap(), var_signal, gates)?;
                 let a = compile_expr(expr.get("alternate").unwrap(), var_signal, gates)?;
                 // MUX: (t && c) || (!t && a)
+                // Optimized: OR(AND(t, c), AND(NOT(t), a))
                 let not_t = next_id();
                 gates.push(Gate {
                     id: next_id(),
@@ -109,82 +178,34 @@ pub fn compile(program: &Value, _sem: &Semantics) -> Result<Circuit> {
                     inputs: vec![t.clone()],
                     output: not_t.clone(),
                 });
-                let t_and_c = next_id();
+                let tc = next_id();
                 gates.push(Gate {
                     id: next_id(),
                     kind: "AND".into(),
                     inputs: vec![t, c],
-                    output: t_and_c.clone(),
+                    output: tc.clone(),
                 });
-                let nt_and_a = next_id();
+                let nta = next_id();
                 gates.push(Gate {
                     id: next_id(),
                     kind: "AND".into(),
                     inputs: vec![not_t, a],
-                    output: nt_and_a.clone(),
+                    output: nta.clone(),
                 });
                 let out = next_id();
                 gates.push(Gate {
                     id: next_id(),
                     kind: "OR".into(),
-                    inputs: vec![t_and_c, nt_and_a],
+                    inputs: vec![tc, nta],
                     output: out.clone(),
                 });
                 Ok(out)
-            }
-            Some("BinaryExpression") => {
-                // Equality: (A == B) -> XNOR -> NOT (XOR)
-                let l = compile_expr(expr.get("left").unwrap(), var_signal, gates)?;
-                let r = compile_expr(expr.get("right").unwrap(), var_signal, gates)?;
-                // XOR = (A || B) && !(A && B)
-                let or_sig = next_id();
-                gates.push(Gate {
-                    id: next_id(),
-                    kind: "OR".into(),
-                    inputs: vec![l.clone(), r.clone()],
-                    output: or_sig.clone(),
-                });
-                let and_sig = next_id();
-                gates.push(Gate {
-                    id: next_id(),
-                    kind: "AND".into(),
-                    inputs: vec![l, r],
-                    output: and_sig.clone(),
-                });
-                let not_and = next_id();
-                gates.push(Gate {
-                    id: next_id(),
-                    kind: "NOT".into(),
-                    inputs: vec![and_sig],
-                    output: not_and.clone(),
-                });
-                let xor = next_id();
-                gates.push(Gate {
-                    id: next_id(),
-                    kind: "AND".into(),
-                    inputs: vec![or_sig, not_and],
-                    output: xor.clone(),
-                });
-
-                match expr.get("operator").and_then(|s| s.as_str()) {
-                    Some("!=") => Ok(xor),
-                    Some("==") => {
-                        let out = next_id();
-                        gates.push(Gate {
-                            id: next_id(),
-                            kind: "NOT".into(),
-                            inputs: vec![xor],
-                            output: out.clone(),
-                        });
-                        Ok(out)
-                    }
-                    _ => anyhow::bail!("Unsupported binary op"),
-                }
             }
             _ => anyhow::bail!("Unsupported expr"),
         }
     }
 
+    // ... (Rest of function remains same: VariableDeclaration, AssignmentExpression)
     let mut declared_inputs = Vec::new();
     let mut outputs = Vec::new();
 
@@ -198,7 +219,6 @@ pub fn compile(program: &Value, _sem: &Semantics) -> Result<Circuit> {
                             let sig = compile_expr(init, &mut var_signal, &mut gates)?;
                             var_signal.insert(name.into(), sig);
                         } else {
-                            // Uninitialized = INPUT lever
                             let out = format!("sig_{}", name);
                             gates.push(Gate {
                                 id: next_id(),
@@ -223,7 +243,6 @@ pub fn compile(program: &Value, _sem: &Semantics) -> Result<Circuit> {
                                 .unwrap();
                             let right = expr.get("right").unwrap();
                             let sig = compile_expr(right, &mut var_signal, &mut gates)?;
-                            // Add Buffer to force a distinct signal output for assignment
                             let out = next_id();
                             gates.push(Gate {
                                 id: next_id(),

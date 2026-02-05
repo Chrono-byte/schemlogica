@@ -341,8 +341,8 @@ pub fn write_schem(_circuit: &Circuit, _layout: &Layout, path: &Path) -> Result<
     enc.insert("z".into(), Value::Int(length));
     metadata.insert("EnclosingSize".into(), Value::Compound(enc));
     root_map.insert("Metadata".into(), Value::Compound(metadata));
-    root_map.insert("MinecraftDataVersion".into(), Value::Int(2586)); // 1.16.5
-    root_map.insert("Version".into(), Value::Int(5));
+    root_map.insert("MinecraftDataVersion".into(), Value::Int(4671)); // 1.16.5
+    root_map.insert("Version".into(), Value::Int(7));
 
     let mut blob = nbt::Blob::new();
     for (k, v) in root_map {
